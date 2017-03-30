@@ -14,7 +14,7 @@ objects:
       slave-label: maven-custom
     labels:
       role: jenkins-slave
-      app: jenkins
+      app: jenkins-slave
     name: jenkins-maven-slave
 - apiVersion: v1
   kind: BuildConfig
@@ -23,7 +23,7 @@ objects:
       description: Builds Jenkins slave image with maven
     labels:
       name: jenkins-maven-slave
-      app: jenkins
+      app: jenkins-slave
     name: jenkins-maven-slave
   spec:
     output:
