@@ -1,0 +1,227 @@
+apiVersion: v1
+kind: Template
+labels:
+  template: kitchensink-binary-pipeline
+metadata:
+  name: kitchensink-binary-pipeline
+objects:
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    labels:
+      build: ${PIPELINE_NAME}
+    name: ${PIPELINE_NAME}
+    annotations:
+      pipeline.alpha.openshift.io/uses: '[{"name": "ks-test", "namespace": "${namespace_test}", "kind": "DeploymentConfig"},{"name": "ks-staging", "namespace": "${namespace_staging}", "kind": "DeploymentConfig"},{"name": "ks-green", "namespace": "${namespace_prod}", "kind": "DeploymentConfig"},{"name": "ks-blue", "namespace": "${namespace_prod}", "kind": "DeploymentConfig"}]'
+  spec:
+    runPolicy: Serial
+    strategy:
+      jenkinsPipelineStrategy:
+        jenkinsfile: |-
+          def mvnCmd = "mvn -s /home/jenkins/.m2/settings.xml"
+          def nexus_url="http://nexus:8081"
+          def version = ""
+          def branch = ""
+          def groupId = ""
+          def artifactId = ""
+          def namespace_ci = "${KS_CI_PROJECT}"
+          def namespace_test = "${KS_TEST_PROJECT}"
+          def namespace_staging = "${KS_STAGING_PROJECT}"
+          def namespace_prod = "${KS_PROD_PROJECT}"
+          def tag="blue"
+          def altTag="green"
+
+          node ('maven-with-nexus') {
+            stage ('Build') {
+              git url: 'http://team:team@gogs:3000/ks-team/kitchensink.git'
+              version = getBuildVersion("pom.xml")
+              groupId = getGroupIdFromPom("pom.xml")
+              artifactId = getArtifactIdFromPom("pom.xml")
+              echo "Building version ${version}"
+              branch = 'build-' + version
+              sh "git checkout -b ${branch}"
+              sh "${mvnCmd} versions:set -DgenerateBackupPoms=false -DnewVersion=${version}"
+              sh "${mvnCmd} clean package -DskipTests=true"
+            }
+  
+            stage ('Run Tests') {
+              try {
+                sh "${mvnCmd} test"
+              } catch (err) {
+                step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml'])
+                throw err
+              }
+            }
+
+            stage ('Publish') {
+              sh "${mvnCmd} deploy -DskipTests=true -DaltDeploymentRepository=nexus::default::${nexus_url}/content/repositories/releases"
+              def commit = "Build " + version
+              sh "git config user.email 'jenkins@example.com'"
+              sh "git config user.name 'jenkins'"
+              sh "git add --all && git commit -m \"${commit}\" && git push origin ${branch}"
+              sh "${mvnCmd} clean"
+            }
+
+            stage ('Update Marker') {
+              def commit = "Build " + version
+              git url: 'http://team:team@gogs:3000/ks-team/kitchensink-ocp.git'
+              sh "sed -i \"s|^NEXUS_URL=.*|NEXUS_URL=${nexus_url}|\" .s2i/bin/assemble"
+              sh "sed -i \"s|^APP_GROUP_ID=.*|APP_GROUP_ID=${groupId}|\" .s2i/bin/assemble"
+              sh "sed -i \"s|^APP_ARTIFACT_ID=.*|APP_ARTIFACT_ID=${artifactId}|\" .s2i/bin/assemble"
+              sh "sed -i \"s|^APP_VERSION=.*|APP_VERSION=${version}|\" .s2i/bin/assemble"
+              sh "git config user.email 'jenkins@example.com'"
+              sh "git config user.name 'jenkins'"
+              sh "git add .s2i/bin/assemble && git commit -m \"${commit}\" && git push origin master"
+            }
+          
+          }
+
+          node {
+            stage ('Build Image') {
+              openshiftBuild(buildConfig: "ks-binary", namespace: "${namespace_ci}", showBuildLogs: "true")
+              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_ci}")
+              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_test}")
+              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "test", destinationNamespace: "${namespace_test}")
+
+            }
+
+            stage ('Integration Tests') {
+              //tear down test environment    
+              tearDownEnvironment("test", namespace_test)
+              // setup test environment
+              sh "oc process kitchensink-deploy -v APPLICATION_NAME=ks -v APPLICATION_ENV=test -n ${namespace_test} | oc create -n ${namespace_test} -f - "
+              openshiftVerifyDeployment(deploymentConfig: "ks-test-postgresql", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_test}")
+              openshiftVerifyDeployment(deploymentConfig: "ks-test", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_test}")
+              node ('maven-with-nexus') {
+                git url: 'http://team:team@gogs:3000/ks-team/kitchensink.git'
+                sh "git checkout -b ${branch}"
+                try {
+                  sh "${mvnCmd} verify"
+                } catch (err) {
+                  step([$class: 'JUnitResultArchiver', testResults: '**/target/failsafe-reports/TEST-*.xml'])
+                  throw err
+                } finally {
+                  // tear down test environment
+                  node {
+                    tearDownEnvironment("test", namespace_test)
+                  }
+                }              
+              }  
+            }
+          }
+
+          node {
+            stage ('Deploy to STAGING') {
+              openshiftTag(sourceStream: "ks", sourceTag: "test", namespace: "${namespace_test}", destinationStream: "ks", destinationTag: "staging", destinationNamespace: "${namespace_staging}")
+              openshiftTag(sourceStream: "ks", sourceTag: "test", namespace: "${namespace_test}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_staging}")
+              sleep 10
+              openshiftVerifyDeployment(deploymentConfig: "ks-staging-postgresql", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_staging}")
+              openshiftVerifyDeployment(deploymentConfig: "ks-staging", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_staging}")
+            }
+
+            stage ('Deploy to PROD (Not Live)') {
+              sh "oc get route ks-prod -n ${namespace_prod} -o jsonpath='{ .spec.to.name }' > activeservice"
+              activeService = readFile('activeservice').trim()
+              if (activeService == "ks-blue") {
+                tag = "green"
+                altTag = "blue"
+              }
+              openshiftTag(sourceStream: "ks", sourceTag: "staging", namespace: "${namespace_staging}", destinationStream: "ks", destinationTag: "prod-${tag}", destinationNamespace: "${namespace_prod}")
+              openshiftTag(sourceStream: "ks", sourceTag: "staging", namespace: "${namespace_staging}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_prod}")
+              sleep 10
+              openshiftVerifyDeployment(deploymentConfig: "ks-${tag}", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_prod}")
+            }
+
+            stage ('Approve Go Live') {
+              timeout(time:30, unit:'MINUTES') {
+                input message:'Go Live in Production (switch to new version)?'
+              }
+            }
+          }
+
+          node {
+            stage ('Go Live') {
+              sh "oc set route-backends ks-prod ks-${tag}=100 ks-${altTag}=0 -n ${namespace_prod}"
+              sh "oc label svc ks-${altTag} app=ks-idle --overwrite -n ${namespace_prod}"
+              sh "oc label svc ks-${tag} app=ks-live --overwrite -n ${namespace_prod}"    
+            }
+          }           
+
+          def getVersionFromPom(pom) {
+            def matcher = readFile(pom) =~ '<version>(.+)</version>'
+            matcher ? matcher[0][1] : null
+          }
+
+          def getGroupIdFromPom(pom) {
+            def matcher = readFile(pom) =~ '<groupId>(.+)</groupId>'
+            matcher ? matcher[0][1] : null
+          }
+
+          def getArtifactIdFromPom(pom) {
+            def matcher = readFile(pom) =~ '<artifactId>(.+)</artifactId>'
+            matcher ? matcher[0][1] : null
+          }
+
+          def String getBuildVersion(pom) {
+            return getVersionFromPom(pom).minus("-SNAPSHOT") + '.' + env.BUILD_NUMBER
+          }
+
+          void tearDownEnvironment(environment, namespace) {
+            try {
+              sh "oc delete dc ks-${environment} -n ${namespace}"
+            } catch (err) {}
+            try {
+              sh "oc delete dc ks-${environment}-postgresql -n ${namespace}"
+            } catch (err) {}
+            try {
+              sh "oc delete service ks-${environment} -n ${namespace}"
+            } catch (err) {}
+            try {
+              sh "oc delete service ks-${environment}-postgresql -n ${namespace}"
+            } catch (err) {}
+            try {
+              sh "oc delete route ks-${environment} -n ${namespace}"
+            } catch (err) {}             
+          }
+      type: JenkinsPipeline
+    triggers:
+    - github:
+        secret: ${GITHUB_WEBHOOK_SECRET}
+      type: GitHub
+    - generic:
+        secret: ${GENERIC_WEBHOOK_SECRET}
+      type: Generic
+parameters:
+- description: The name for the pipeline.
+  displayName: Pipeline Name
+  name: PIPELINE_NAME
+  required: true
+  value: ks-binary-pipeline
+- description: CI Project name
+  displayName: CI Project Name
+  name: KS_CI_PROJECT
+  required: true
+- description: TEST Project name
+  displayName: TEST Project Name
+  name: KS_TEST_PROJECT
+  required: true
+- description: STAGING Project name
+  displayName: STAGING Project Name
+  name: KS_STAGING_PROJECT
+  required: true
+- description: PROD Project name
+  displayName: PROD Project Name
+  name: KS_PROD_PROJECT
+  required: true
+- description: GitHub webhook secret
+  displayName: GitHub Webhook Secret
+  from: '[a-zA-Z0-9]{8}'
+  generate: expression
+  name: GITHUB_WEBHOOK_SECRET
+  required: true
+- description: Generic webhook secret
+  displayName: Generic Webhook Secret
+  from: '[a-zA-Z0-9]{8}'
+  generate: expression
+  name: GENERIC_WEBHOOK_SECRET
+  required: true
