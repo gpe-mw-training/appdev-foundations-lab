@@ -57,7 +57,6 @@ parameters:
   displayName: Git repository
   name: GIT_URI
   required: true
-  value: https://github.com/jbossdemocentral/coolstore-microservice
 - displayName: Git branch/tag
   name: GIT_REF
   required: true
