@@ -11,7 +11,7 @@ objects:
   metadata:
     annotations:
       slave-directory: /home/jenkins
-      slave-label: maven-custom
+      slave-label: maven-with-nexus
     labels:
       role: jenkins-slave
       app: jenkins-slave
@@ -37,10 +37,6 @@ objects:
         ref: master
       type: Git
     strategy:
-      dockerStrategy:
-        from:
-          kind: DockerImage
-          name: openshift3/jenkins-slave-maven-rhel7
       type: Docker
     triggers:
     - type: ConfigChange
