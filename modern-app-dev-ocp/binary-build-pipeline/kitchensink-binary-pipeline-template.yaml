@@ -28,6 +28,7 @@ objects:
           def namespace_test = "${KS_TEST_PROJECT}"
           def namespace_staging = "${KS_STAGING_PROJECT}"
           def namespace_prod = "${KS_PROD_PROJECT}"
+          def ks_test_app = "http://ks-test-${KS_TEST_PROJECT}.${KS_DOMAIN}"
           def tag="blue"
           def altTag="green"
 
@@ -96,7 +97,7 @@ objects:
                 git url: 'http://team:team@gogs:3000/ks-team/kitchensink.git'
                 sh "git checkout -b ${branch}"
                 try {
-                  sh "${mvnCmd} verify"
+                  sh "${mvnCmd} verify -Dtest.it.hostName=${ks_test_app} -DskipUTs=true"
                 } catch (err) {
                   step([$class: 'JUnitResultArchiver', testResults: '**/target/failsafe-reports/TEST-*.xml'])
                   throw err
@@ -197,6 +198,10 @@ parameters:
   name: PIPELINE_NAME
   required: true
   value: ks-binary-pipeline
+- description: Domain name
+  displayName: Domain name
+  name: KS_DOMAIN
+  required: true
 - description: CI Project name
   displayName: CI Project Name
   name: KS_CI_PROJECT
