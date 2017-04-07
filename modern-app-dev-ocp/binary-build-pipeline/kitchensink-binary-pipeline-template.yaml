@@ -81,9 +81,6 @@ objects:
             stage ('Build Image') {
               openshiftBuild(buildConfig: "ks-binary", namespace: "${namespace_ci}", showBuildLogs: "true")
               openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_ci}")
-              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_test}")
-              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "test", destinationNamespace: "${namespace_test}")
-
             }
 
             stage ('Integration Tests') {
@@ -92,6 +89,8 @@ objects:
               // setup test environment
               sh "oc process kitchensink-deploy -v APPLICATION_NAME=ks -v APPLICATION_ENV=test -n ${namespace_test} | oc create -n ${namespace_test} -f - "
               openshiftVerifyDeployment(deploymentConfig: "ks-test-postgresql", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_test}")
+              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "${version}", destinationNamespace: "${namespace_test}")
+              openshiftTag(sourceStream: "ks", sourceTag: "latest", namespace: "${namespace_ci}", destinationStream: "ks", destinationTag: "test", destinationNamespace: "${namespace_test}")
               openshiftVerifyDeployment(deploymentConfig: "ks-test", replicaCount: 1, verifyReplicaCount: true, namespace: "${namespace_test}")
               node ('maven-with-nexus') {
                 git url: 'http://team:team@gogs:3000/ks-team/kitchensink.git'
