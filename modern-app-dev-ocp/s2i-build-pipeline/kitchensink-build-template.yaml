@@ -39,7 +39,7 @@ objects:
         env:
         - name: MAVEN_MIRROR_URL
           value: ${MAVEN_MIRROR_URL}
-        forcePull: true
+        forcePull: false
         from:
           kind: ImageStreamTag
           name: jboss-eap70-openshift:1.4
