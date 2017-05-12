@@ -1,4 +1,4 @@
-FROM openshift3/jenkins-slave-maven-rhel7
+FROM registry.access.redhat.com/openshift3/jenkins-slave-maven-rhel7
 
 USER 1001
 
